@@ -1,0 +1,225 @@
+#!/usr/bin/zsh
+
+# ===== ANSI Colors =====
+RED="\033[31m"
+GREEN="\033[32m"
+YELLOW="\033[33m"
+BLUE="\033[34m"
+RESET="\033[0m"
+
+# ===== Check Terminal =====
+if [[ ! -t 0 ]]; then
+    echo -e "${RED}Error: This script requires an interactive terminal.${RESET}" >&2
+    exit 1
+fi
+
+# ===== Auto-Sudo =====
+if [[ $EUID -ne 0 ]]; then
+    echo -e "${RED}This script requires root. Retrying with sudo...${RESET}"
+    exec sudo --preserve-env=PATH "$0" "$@"
+    exit $?
+fi
+
+# ===== Log File =====
+LOG_FILE="$HOME/uninstaller_${1:-unknown}.log"
+echo -e "${BLUE}Detailed log: $LOG_FILE${RESET}"
+{
+    # ===== Current Process Info =====
+    SCRIPT_PID=$$
+    SCRIPT_NAME="${0##*/}"
+    SESSION_ID=$(ps -o sid= -p $SCRIPT_PID)
+
+    # ===== Header =====
+    echo -e "\n===== UNINSTALLER: ${1:-unknown} ====="
+    echo -e "Date: $(date)\n"
+
+    # ===== Validation =====
+    if [[ -z "$1" ]]; then
+        echo -e "${RED}USAGE: $0 <app_name>${RESET}\nExample: $0 vscode" >&2
+        exit 1
+    fi
+
+    APP_NAME="$1"
+
+    # ===== Interactive Function =====
+    confirm_action() {
+        local prompt="$1"
+        local action="$2"
+        
+        # Ensure we're reading from the terminal
+        if [[ ! -t 0 ]]; then
+            exec < /dev/tty
+        fi
+        
+        echo -e "${YELLOW}$prompt (y/N)${RESET}"
+        while true; do
+            read -k 1 -r choice
+            case "$choice" in
+                [yY]) 
+                    echo -e "\n${GREEN}Proceeding...${RESET}"
+                    eval "$action"
+                    return 0
+                    ;;
+                [nN]|"")
+                    echo -e "\n${YELLOW}Skipped.${RESET}"
+                    return 1
+                    ;;
+                *)
+                    echo -e "\n${RED}Invalid choice. Please answer y or n.${RESET}"
+                    ;;
+            esac
+        done
+    }
+
+    # ===== Process Detection =====
+    find_real_processes() {
+        local all_pids=($(pgrep -f "$APP_NAME" 2>/dev/null))
+        local real_pids=()
+
+        for pid in "${all_pids[@]}"; do
+            # Skip if: our script, zombie, or in our session
+            if [[ "$pid" -eq $SCRIPT_PID ]] || \
+               [[ "$(ps -o stat= -p $pid)" =~ 'Z' ]] || \
+               [[ "$(ps -o sid= -p $pid)" -eq $SESSION_ID ]]; then
+                continue
+            fi
+
+            # Get the actual binary path
+            local exe=$(readlink -f "/proc/$pid/exe" 2>/dev/null)
+            [[ -z "$exe" ]] && continue
+
+            # Skip if it's part of our script environment
+            if [[ "$exe" =~ "sudo|tee|zsh|bash|$SCRIPT_NAME" ]] || \
+               [[ "$(ps -o cmd= -p $pid)" =~ "sudo.*$SCRIPT_NAME|$SCRIPT_NAME|tee.*\.log" ]]; then
+                continue
+            fi
+
+            real_pids+=("$pid")
+        done
+
+        echo "${real_pids[@]}"
+    }
+
+    # ===== Main Process =====
+
+    # 1. Active Processes
+    echo -e "${YELLOW}[1/5] Checking processes...${RESET}"
+    pids=($(find_real_processes))
+
+    if [[ ${#pids[@]} -gt 0 ]]; then
+        echo -e "${RED}Running application processes:${RESET}"
+        ps -o pid,cmd -p "${pids[@]}" 2>/dev/null
+        
+        confirm_action "Kill these processes?" "kill -9 ${pids[@]} && echo -e '${GREEN}Processes terminated.${RESET}'"
+    fi
+
+    # 2. Uninstall Packages
+    echo -e "${YELLOW}\n[2/5] Searching packages...${RESET}"
+
+    # APT packages
+    if command -v apt &>/dev/null; then
+        apt_pkgs=($(apt list --installed 2>/dev/null | grep -i "$APP_NAME" | cut -d'/' -f1))
+        if [[ ${#apt_pkgs[@]} -gt 0 ]]; then
+            echo -e "${BLUE}APT packages found:${RESET}"
+            printf '%s\n' "${apt_pkgs[@]}"
+            
+            confirm_action "Remove these APT packages?" "apt-get remove --purge -y ${apt_pkgs[@]} && apt-get autoremove --purge -y"
+        else
+            echo -e "${GREEN}No APT packages found.${RESET}"
+        fi
+    fi
+
+    # Snap packages
+    if command -v snap &>/dev/null; then
+        if snap list | grep -qi "^$APP_NAME"; then
+            echo -e "${BLUE}Snap package found:${RESET}"
+            snap list | grep -i "^$APP_NAME"
+            
+            confirm_action "Remove this Snap package?" "snap remove --purge \"$APP_NAME\""
+        else
+            echo -e "${GREEN}No Snap packages found.${RESET}"
+        fi
+    fi
+
+    # Flatpak packages
+    if command -v flatpak &>/dev/null; then
+        flatpak_pkgs=($(flatpak list --app | grep -i "$APP_NAME" | awk '{print $2}'))
+        if [[ ${#flatpak_pkgs[@]} -gt 0 ]]; then
+            echo -e "${BLUE}Flatpak packages found:${RESET}"
+            flatpak list --app | grep -i "$APP_NAME"
+            
+            confirm_action "Remove these Flatpak packages?" "flatpak uninstall --delete-data -y ${flatpak_pkgs[@]}"
+        else
+            echo -e "${GREEN}No Flatpak packages found.${RESET}"
+        fi
+    fi
+
+    # 3. Config Files
+    echo -e "${YELLOW}\n[3/5] Searching configuration files...${RESET}"
+    config_locations=(
+        "$HOME/.config/$APP_NAME"
+        "$HOME/.config/$APP_NAME*"
+        "$HOME/.local/share/$APP_NAME"
+        "$HOME/.local/share/$APP_NAME*"
+        "/etc/$APP_NAME"
+        "/etc/$APP_NAME*"
+        "/opt/$APP_NAME"
+        "/opt/$APP_NAME*"
+    )
+
+    found_configs=()
+    for loc in "${config_locations[@]}"; do
+        if [[ -e $loc ]]; then
+            found_configs+=("$loc")
+            echo -e "${RED}Found:${RESET} $loc"
+            ls -ld "$loc"
+        fi
+    done
+
+    if [[ ${#found_configs[@]} -gt 0 ]]; then
+        confirm_action "Remove these configuration files?" "rm -rfv ${found_configs[@]}"
+    else
+        echo -e "${GREEN}No configuration files found.${RESET}"
+    fi
+
+    # 4. Residual Files
+    echo -e "${YELLOW}\n[4/5] Searching residual files...${RESET}"
+    residual_files=()
+    residual_dirs=()
+
+    # Find files and directories separately
+    while IFS= read -r -d $'\0' file; do
+        if [[ -f "$file" ]]; then
+            residual_files+=("$file")
+            echo -e "${RED}Found file:${RESET} $file"
+        elif [[ -d "$file" ]]; then
+            residual_dirs+=("$file")
+            echo -e "${RED}Found directory:${RESET} $file"
+        fi
+    done < <(find /usr/share /usr/local/share /var/lib -iname "*$APP_NAME*" -print0 2>/dev/null)
+
+    # Desktop entries and icons
+    while IFS= read -r -d $'\0' file; do
+        if [[ -f "$file" ]]; then
+            residual_files+=("$file")
+            echo -e "${RED}Found desktop entry:${RESET} $file"
+        fi
+    done < <(find /usr/share/applications /usr/local/share/applications -iname "*$APP_NAME*.desktop" -print0 2>/dev/null)
+
+    if [[ ${#residual_files[@]} -gt 0 || ${#residual_dirs[@]} -gt 0 ]]; then
+        confirm_action "Remove these residual files and directories?" "
+            [[ ${#residual_files[@]} -gt 0 ]] && rm -fv ${residual_files[@]}
+            [[ ${#residual_dirs[@]} -gt 0 ]] && rm -rfv ${residual_dirs[@]}
+        "
+    else
+        echo -e "${GREEN}No residual files found.${RESET}"
+    fi
+
+    # 5. Final cleanup
+    echo -e "${YELLOW}\n[5/5] Final cleanup...${RESET}"
+    confirm_action "Run apt autoremove and clean?" "apt-get autoremove --purge -y && apt-get clean"
+
+    echo -e "${GREEN}\n✔ Uninstallation complete! ${RESET}"
+} | tee -a "$LOG_FILE"
+
+echo -e "Log saved at: $LOG_FILE\n"
