@@ -140,3 +140,5 @@ watch -d 'df -h; echo; ls -l ~/.config | grep -i <app>'
 ## License
 
 MIT License - See LICENSE for details
+
+If you find this useful, please give it a ⭐!
