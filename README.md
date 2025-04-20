@@ -78,7 +78,7 @@ cleanuninstall sublime-text
 
 - Root access (for system-wide uninstallation)
 
-# Supported Package Managers
+## Supported Package Managers
 
 - APT (Debian/Ubuntu)
 
@@ -86,7 +86,7 @@ cleanuninstall sublime-text
 
 - Flatpak
 
-# Configuration
+## Configuration
 
 The script automatically detects configuration files in these locations:
 
@@ -98,7 +98,7 @@ The script automatically detects configuration files in these locations:
 
 - /opt/<app>
 
-# Logging
+## Logging
 
 A detailed log is created at:
 
